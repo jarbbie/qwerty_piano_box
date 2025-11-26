@@ -1,15 +1,40 @@
-# QWERTY piano using external fluidsynth process (no pyfluidsynth)
-# Needs: python3-pygame, fluidsynth (apt install)
+# This version depends on: fluidsynth
+
+# Extended QWERTY piano for Arch Linux
+# White keys (lower octave):  Z X C V B N M  -> C4 D4 E4 F4 G4 A4 B4
+# Black keys (lower octave):  S D   G H J    -> C#4 D#4 F#4 G#4 A#4
+#
+# White keys (upper octave):  Q W E R T Y U I -> C5 D5 E5 F5 G5 A5 B5 C6
+# Black keys (upper octave):  2 3   5 6 7     -> C#5 D#5 F#5 G#5 A#5
+#
+# Quit: ESC or close window
+#
+# Put UprightPianoKW-20220221.sf2 in the same folder (or edit SOUNDFONT).
 
 import os
 import sys
 import pygame
-import subprocess
+import fluidsynth
 
-SOUNDFONT = "UprightPianoKW-20220221.sf2"  # put this file next to piano.py
-AUDIO_DRIVERS = ["pulseaudio", "alsa", None]  # try these for fluidsynth
+SOUNDFONT = "UprightPianoKW-20220221.sf2"  # change path if needed
+SAMPLE_RATE = 44100
 
-# MIDI note mapping (same as before)
+# Try common Linux audio backends (PipeWire usually exposes PulseAudio)
+AUDIO_DRIVERS = ["pulseaudio", "alsa", None]
+
+# MIDI notes:
+# C4 = 60, then chromatic up
+#
+# Lower row (white keys)
+# Z=60(C4), X=62(D4), C=64(E4), V=65(F4), B=67(G4), N=69(A4), M=71(B4)
+# Lower row (black keys)
+# S=61(C#4), D=63(D#4), G=66(F#4), H=68(G#4), J=70(A#4)
+#
+# Upper row (white keys)
+# Q=72(C5), W=74(D5), E=76(E5), R=77(F5), T=79(G5), Y=81(A5), U=83(B5), I=84(C6)
+# Upper row (black keys)
+# 2=73(C#5), 3=75(D#5), 5=78(F#5), 6=80(G#5), 7=82(A#5)
+
 KEYMAP = {
     # Lower octave white
     pygame.K_z: 60,  # C4
@@ -18,7 +43,7 @@ KEYMAP = {
     pygame.K_v: 65,  # F4
     pygame.K_b: 67,  # G4
     pygame.K_n: 69,  # A4
-    pygame.K_m: 71,  # B4
+    pygame.K_m: 71,  # B4,
 
     # Lower octave black
     pygame.K_s: 61,  # C#4
@@ -45,57 +70,35 @@ KEYMAP = {
     pygame.K_7: 82,  # A#5
 }
 
+def init_synth():
+    last_err = None
+    for drv in AUDIO_DRIVERS:
+        try:
+            fs = fluidsynth.Synth(samplerate=SAMPLE_RATE)
+            fs.start(driver=drv) if drv else fs.start()
+            return fs
+        except Exception as e:
+            last_err = e
+    print("Could not start FluidSynth. Last error:", last_err)
+    sys.exit(1)
 
-def start_fluidsynth():
-    """Start fluidsynth as a subprocess and return the process object."""
+def main():
     if not os.path.exists(SOUNDFONT):
         print(f"SoundFont not found: {SOUNDFONT}")
         sys.exit(1)
 
-    last_err = None
-    for drv in AUDIO_DRIVERS:
-        try:
-            cmd = ["fluidsynth", "-i"]  # -i = no interactive prompt
-            if drv:
-                cmd += ["-a", drv]       # set audio driver
-            cmd.append(SOUNDFONT)
-
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-            )
-            return proc
-        except Exception as e:
-            last_err = e
-
-    print("Could not start fluidsynth. Last error:", last_err)
-    sys.exit(1)
-
-
-def fs_cmd(proc, line: str):
-    """Send a single command line to fluidsynth."""
-    try:
-        proc.stdin.write(line + "\n")
-        proc.stdin.flush()
-    except Exception:
-        pass
-
-
-def main():
+    # Pygame window just for key events + small HUD
     pygame.init()
-    pygame.display.set_caption("Qwerty Piano (fluidsynth binary)")
+    pygame.display.set_caption("Qwerty Piano (VirtualPiano-style)")
     screen = pygame.display.set_mode((640, 180))
     font = pygame.font.SysFont(None, 22)
 
-    fs_proc = start_fluidsynth()
-
-    # optional: max volume
-    fs_cmd(fs_proc, "cc 0 7 127")    # channel volume
-    fs_cmd(fs_proc, "cc 0 11 127")   # expression
+    fs = init_synth()
+    sfid = fs.sfload(SOUNDFONT)
+    fs.program_select(0, sfid, 0, 0)  # bank 0, program 0 (usually piano)
+    
+    fs.cc(0, 7, 127)     # controller 7 = channel volume
+    fs.cc(0, 11, 127)    # controller 11 = expression (secondary volume)
 
     down = set()
     running = True
@@ -111,13 +114,13 @@ def main():
                     running = False
                 elif event.key in KEYMAP and event.key not in down:
                     note = KEYMAP[event.key]
-                    fs_cmd(fs_proc, f"noteon 0 {note} 127")
+                    fs.noteon(0, note, 127)
                     down.add(event.key)
 
             elif event.type == pygame.KEYUP:
                 if event.key in KEYMAP and event.key in down:
                     note = KEYMAP[event.key]
-                    fs_cmd(fs_proc, f"noteoff 0 {note}")
+                    fs.noteoff(0, note)
                     down.remove(event.key)
 
         screen.fill((18, 18, 18))
@@ -136,16 +139,13 @@ def main():
         pygame.display.flip()
         clock.tick(120)
 
-    # stop all notes & quit fluidsynth
-    fs_cmd(fs_proc, "panic")
-    fs_cmd(fs_proc, "quit")
+    # Clean up
     try:
-        fs_proc.terminate()
+        fs.cc(0, 123, 0)  # All Notes Off
     except Exception:
         pass
-
+    fs.delete()
     pygame.quit()
-
 
 if __name__ == "__main__":
     main()
